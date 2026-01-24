@@ -1,4 +1,4 @@
-# converter.py (Concurrent Version with Health Check)
+# converter.py (Enhanced Version with Header/Footer & Text Options)
 
 import os
 import time
@@ -10,7 +10,7 @@ from datetime import datetime
 from threading import Thread
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from concurrent.futures import ThreadPoolExecutor
-import queue
+import re
 
 load_dotenv()
 
@@ -21,17 +21,18 @@ MONGODB_URI = os.getenv("MONGODB_URI")
 DB_NAME = os.getenv("MONGO_DB_NAME", "viralbox_db")
 VIRALBOX_DOMAIN = os.getenv("VIRALBOX_DOMAIN", "viralbox.in")
 HEALTH_CHECK_PORT = int(os.getenv("PORT", "8000"))
-MAX_WORKERS = int(os.getenv("MAX_WORKERS", "10"))  # Concurrent workers
+MAX_WORKERS = int(os.getenv("MAX_WORKERS", "10"))
 
 if not BOT_TOKEN or not MONGODB_URI:
     raise RuntimeError("BOT_TOKEN and MONGODB_URI must be in .env")
 
 # ------------------ DB SETUP ------------------ #
-client = MongoClient(MONGODB_URI, maxPoolSize=50)  # Increased pool size
+client = MongoClient(MONGODB_URI, maxPoolSize=50)
 db = client[DB_NAME]
 
 links_col = db["links"]
 user_apis_col = db["user_apis"]
+user_settings_col = db["user_settings"]  # New collection for user preferences
 
 
 # ------------------ HEALTH CHECK SERVER ------------------ #
@@ -66,14 +67,27 @@ def start_health_server():
 # ------------------ HELPERS ------------------ #
 
 def extract_urls(text):
+    """Extract all URLs from text"""
     if not text:
         return []
-    import re
     urls = re.findall(r"(https?://[^\s]+)", text)
     return urls if urls else []
 
 
+def replace_urls_in_text(text, url_mapping):
+    """Replace old URLs with new shortened URLs in text"""
+    if not text:
+        return text
+    
+    result = text
+    for old_url, new_url in url_mapping.items():
+        result = result.replace(old_url, new_url)
+    
+    return result
+
+
 def is_viralbox(url):
+    """Check if URL is from viralbox domain"""
     try:
         u = urlparse(url)
         return VIRALBOX_DOMAIN in u.hostname
@@ -82,6 +96,7 @@ def is_viralbox(url):
 
 
 def send_message(chat_id, text):
+    """Send text message to chat"""
     try:
         requests.post(
             f"{TELEGRAM_API}/sendMessage",
@@ -93,6 +108,7 @@ def send_message(chat_id, text):
 
 
 def send_media(chat_id, mtype, file_id, caption=None):
+    """Send media with caption"""
     endpoint = {
         "photo": "sendPhoto",
         "video": "sendVideo",
@@ -107,7 +123,9 @@ def send_media(chat_id, mtype, file_id, caption=None):
         return
 
     try:
-        payload = {"chat_id": chat_id, "caption": caption}
+        payload = {"chat_id": chat_id}
+        if caption:
+            payload["caption"] = caption
         payload[mtype] = file_id
         requests.post(f"{TELEGRAM_API}/{endpoint}", json=payload, timeout=10)
     except Exception as e:
@@ -117,6 +135,7 @@ def send_media(chat_id, mtype, file_id, caption=None):
 # ------------------ DATABASE FUNCTIONS ------------------ #
 
 def save_api_key(user_id, apikey):
+    """Save user's API key"""
     try:
         user_apis_col.update_one(
             {"userId": user_id},
@@ -128,6 +147,7 @@ def save_api_key(user_id, apikey):
 
 
 def get_api_key(user_id):
+    """Get user's API key"""
     try:
         doc = user_apis_col.find_one({"userId": user_id})
         return doc["apiKey"] if doc else None
@@ -136,7 +156,47 @@ def get_api_key(user_id):
         return None
 
 
+def save_user_setting(user_id, key, value):
+    """Save user setting (header/footer/keep_text)"""
+    try:
+        user_settings_col.update_one(
+            {"userId": user_id},
+            {"$set": {key: value}},
+            upsert=True
+        )
+    except Exception as e:
+        print(f"DB Error saving setting: {e}")
+
+
+def delete_user_setting(user_id, key):
+    """Delete user setting"""
+    try:
+        user_settings_col.update_one(
+            {"userId": user_id},
+            {"$unset": {key: ""}}
+        )
+    except Exception as e:
+        print(f"DB Error deleting setting: {e}")
+
+
+def get_user_settings(user_id):
+    """Get all user settings"""
+    try:
+        doc = user_settings_col.find_one({"userId": user_id})
+        if not doc:
+            return {"header": None, "footer": None, "keep_text": False}
+        return {
+            "header": doc.get("header"),
+            "footer": doc.get("footer"),
+            "keep_text": doc.get("keep_text", False)
+        }
+    except Exception as e:
+        print(f"DB Error getting settings: {e}")
+        return {"header": None, "footer": None, "keep_text": False}
+
+
 def save_converted(longURL, shortURL):
+    """Save converted link to database"""
     try:
         links_col.insert_one({
             "longURL": longURL,
@@ -147,6 +207,7 @@ def save_converted(longURL, shortURL):
 
 
 def find_long_url(shortURL):
+    """Find original long URL from short URL"""
     try:
         doc = links_col.find_one({"shortURL": shortURL})
         if doc:
@@ -157,9 +218,10 @@ def find_long_url(shortURL):
         return None
 
 
-# ------------------ SHORTNING ------------------ #
+# ------------------ SHORTENING ------------------ #
 
 def short_with_user_token(apiKey, longURL):
+    """Shorten URL using user's API key"""
     try:
         api = f"https://viralbox.in/api?api={apiKey}&url={requests.utils.requote_uri(longURL)}"
         r = requests.get(api, timeout=15)
@@ -184,7 +246,7 @@ def process_message(msg):
         user_id = msg["from"]["id"]
         text = msg.get("text", "")
 
-        # -------- Commands -------- #
+        # -------- /start Command -------- #
         if text.startswith("/start"):
             name = msg["from"].get("first_name", "User")
             user_api = get_api_key(user_id)
@@ -200,16 +262,36 @@ f"2️⃣ Go To 👉 https://viralbox.in/member/tools/api\n"
 f"3️⃣ Copy your API Key\n"
 f"4️⃣ Send /set_api <API_KEY>\n"
 f"5️⃣ Send me any viralbox.in link\n\n"
+f"📋 Available Commands:\n"
 f"/set_api - Save your API Key\n"
-f"/help - Support - @viralbox_support")
+f"/set_header - Add custom header\n"
+f"/set_footer - Add custom footer\n"
+f"/keep_text - Keep original text with converted links\n"
+f"/delete_text - Remove original text, show only converted links\n"
+f"/delete_header - Remove custom header\n"
+f"/delete_footer - Remove custom footer\n"
+f"/help - Get help and support")
             return
 
+        # -------- /help Command -------- #
         if text.startswith("/help"):
-            send_message(chat_id, "Hii For Any Query Contact Support - @viralbox_support")
+            send_message(chat_id, 
+f"📚 Bot Commands Help:\n\n"
+f"🔑 /set_api <API_KEY> - Save your viralbox.in API key\n\n"
+f"📝 /set_header <text> - Add custom header text above links\n"
+f"Example: /set_header 👇 Download Links 👇\n\n"
+f"📝 /set_footer <text> - Add custom footer text below links\n"
+f"Example: /set_footer Join: @viralbox_support\n\n"
+f"✅ /keep_text - Keep your original message text and replace only links\n\n"
+f"❌ /delete_text - Show only converted links (with header/footer if set)\n\n"
+f"🗑️ /delete_header - Remove custom header\n"
+f"🗑️ /delete_footer - Remove custom footer\n\n"
+f"💬 For any query contact: @viralbox_support")
             return
 
+        # -------- /set_api Command -------- #
         if text.startswith("/set_api"):
-            parts = text.split()
+            parts = text.split(maxsplit=1)
             if len(parts) < 2:
                 send_message(chat_id, "❌ Correct usage: /set_api <API_KEY>")
                 return
@@ -219,17 +301,69 @@ f"/help - Support - @viralbox_support")
             send_message(chat_id, "✅ API Key Saved Successfully!")
             return
 
+        # -------- /set_header Command -------- #
+        if text.startswith("/set_header"):
+            parts = text.split(maxsplit=1)
+            if len(parts) < 2:
+                send_message(chat_id, "❌ Usage: /set_header <your header text>\n\nExample: /set_header 👇 Download Links 👇")
+                return
+            
+            header_text = parts[1].strip()
+            save_user_setting(user_id, "header", header_text)
+            send_message(chat_id, f"✅ Header Saved Successfully!\n\n📝 Your Header:\n{header_text}")
+            return
+
+        # -------- /delete_header Command -------- #
+        if text.startswith("/delete_header"):
+            delete_user_setting(user_id, "header")
+            send_message(chat_id, "✅ Header Deleted Successfully!")
+            return
+
+        # -------- /set_footer Command -------- #
+        if text.startswith("/set_footer"):
+            parts = text.split(maxsplit=1)
+            if len(parts) < 2:
+                send_message(chat_id, "❌ Usage: /set_footer <your footer text>\n\nExample: /set_footer Join: @viralbox_support")
+                return
+            
+            footer_text = parts[1].strip()
+            save_user_setting(user_id, "footer", footer_text)
+            send_message(chat_id, f"✅ Footer Saved Successfully!\n\n📝 Your Footer:\n{footer_text}")
+            return
+
+        # -------- /delete_footer Command -------- #
+        if text.startswith("/delete_footer"):
+            delete_user_setting(user_id, "footer")
+            send_message(chat_id, "✅ Footer Deleted Successfully!")
+            return
+
+        # -------- /keep_text Command -------- #
+        if text.startswith("/keep_text"):
+            save_user_setting(user_id, "keep_text", True)
+            send_message(chat_id, "✅ Keep Text Mode Enabled!\n\n📝 Now your original text will be kept and only links will be replaced.")
+            return
+
+        # -------- /delete_text Command -------- #
+        if text.startswith("/delete_text"):
+            save_user_setting(user_id, "keep_text", False)
+            send_message(chat_id, "✅ Delete Text Mode Enabled!\n\n📝 Now only converted links (with header/footer) will be shown.")
+            return
+
         # -------- Ensure API Key Exists -------- #
         user_api = get_api_key(user_id)
         if not user_api:
             send_message(chat_id, "❌ Please set your API key first:\n/set_api <API_KEY>")
             return
 
+        # -------- Get User Settings -------- #
+        settings = get_user_settings(user_id)
+
         # -------- URL Extraction -------- #
-        urls = extract_urls(text)
         media_type = None
         file_id = None
+        original_text = text
 
+        # Check for media
         for t in ["photo", "video", "document", "audio", "voice", "animation"]:
             if msg.get(t):
                 media_type = t
@@ -237,15 +371,18 @@ f"/help - Support - @viralbox_support")
                     file_id = msg[t][-1]["file_id"]
                 else:
                     file_id = msg[t]["file_id"]
-
-                urls = extract_urls(msg.get("caption", "")) or urls
+                
+                original_text = msg.get("caption", "")
                 break
+
+        urls = extract_urls(original_text)
 
         if not urls:
             send_message(chat_id, "❌ Please send a valid viralbox.in link.")
             return
 
         # -------- Process All URLs -------- #
+        url_mapping = {}  # Old URL -> New URL mapping
         converted_links = []
         
         for url in urls:
@@ -264,11 +401,28 @@ f"/help - Support - @viralbox_support")
                 return
 
             save_converted(longURL, newShort)
+            url_mapping[url] = newShort
             converted_links.append(newShort)
 
-        # -------- Send Converted Links -------- #
-        response_text = "\n".join([f"✅Video Link\n{link}" for link in converted_links])
+        # -------- Build Response Text -------- #
+        if settings["keep_text"]:
+            # Keep original text and replace URLs
+            response_text = replace_urls_in_text(original_text, url_mapping)
+        else:
+            # Show only converted links with header/footer
+            parts = []
+            
+            if settings["header"]:
+                parts.append(settings["header"])
+            
+            parts.extend(converted_links)
+            
+            if settings["footer"]:
+                parts.append(settings["footer"])
+            
+            response_text = "\n\n".join(parts)
 
+        # -------- Send Response -------- #
         if not media_type:
             send_message(chat_id, response_text)
         else:
