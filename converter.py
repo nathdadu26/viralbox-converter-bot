@@ -74,14 +74,25 @@ def extract_urls(text):
     return urls if urls else []
 
 
-def replace_urls_in_text(text, url_mapping):
-    """Replace old URLs with new shortened URLs in text"""
+def replace_urls_in_text(text, url_mapping, all_urls):
+    """Replace viralbox URLs and remove all other URLs from text"""
     if not text:
         return text
     
     result = text
+    
+    # First, replace viralbox URLs with new shortened URLs
     for old_url, new_url in url_mapping.items():
         result = result.replace(old_url, new_url)
+    
+    # Then, remove all non-viralbox URLs
+    for url in all_urls:
+        if url not in url_mapping:  # If not a viralbox URL
+            result = result.replace(url, "")
+    
+    # Clean up extra whitespace and newlines
+    result = re.sub(r'\n\s*\n', '\n\n', result)  # Remove multiple blank lines
+    result = result.strip()
     
     return result
 
@@ -375,21 +386,25 @@ f"💬 For any query contact: @viralbox_support")
                 original_text = msg.get("caption", "")
                 break
 
-        urls = extract_urls(original_text)
+        all_urls = extract_urls(original_text)
+        
+        # Filter only viralbox.in URLs
+        viralbox_urls = [url for url in all_urls if is_viralbox(url)]
 
-        if not urls:
-            send_message(chat_id, "❌ Please send a valid viralbox.in link.")
+        if not viralbox_urls:
+            if all_urls:
+                # URLs exist but none are viralbox.in
+                send_message(chat_id, "❌ No viralbox.in links found! Please send a valid viralbox.in link.")
+            else:
+                # No URLs at all
+                send_message(chat_id, "❌ Please send a valid viralbox.in link.")
             return
 
-        # -------- Process All URLs -------- #
+        # -------- Process Only Viralbox URLs -------- #
         url_mapping = {}  # Old URL -> New URL mapping
         converted_links = []
         
-        for url in urls:
-            if not is_viralbox(url):
-                send_message(chat_id, f"❌ Only viralbox.in links are supported! (Invalid: {url})")
-                return
-
+        for url in viralbox_urls:
             longURL = find_long_url(url)
             if not longURL:
                 send_message(chat_id, f"❌ This link does not exist in database. ({url})")
@@ -406,8 +421,8 @@ f"💬 For any query contact: @viralbox_support")
 
         # -------- Build Response Text -------- #
         if settings["keep_text"]:
-            # Keep original text and replace URLs
-            response_text = replace_urls_in_text(original_text, url_mapping)
+            # Keep original text, replace viralbox URLs and remove other URLs
+            response_text = replace_urls_in_text(original_text, url_mapping, all_urls)
         else:
             # Show only converted links with header/footer
             parts = []
