@@ -22,6 +22,7 @@ DB_NAME = os.getenv("MONGO_DB_NAME", "viralbox_db")
 VIRALBOX_DOMAIN = os.getenv("VIRALBOX_DOMAIN", "viralbox.in")
 HEALTH_CHECK_PORT = int(os.getenv("PORT", "8000"))
 MAX_WORKERS = int(os.getenv("MAX_WORKERS", "10"))
+LOG_CHANNEL_ID = os.getenv("LOG_CHANNEL_ID")  # Add to .env file
 
 if not BOT_TOKEN or not MONGODB_URI:
     raise RuntimeError("BOT_TOKEN and MONGODB_URI must be in .env")
@@ -143,6 +144,29 @@ def send_media(chat_id, mtype, file_id, caption=None):
         print(f"Error sending media: {e}")
 
 
+def log_to_channel(message):
+    """Send log message to log channel"""
+    if not LOG_CHANNEL_ID:
+        return
+    
+    try:
+        requests.post(
+            f"{TELEGRAM_API}/sendMessage",
+            json={"chat_id": LOG_CHANNEL_ID, "text": message},
+            timeout=10
+        )
+    except Exception as e:
+        print(f"Error sending log: {e}")
+
+
+def format_user_info(user):
+    """Format user information for logging"""
+    name = user.get("first_name", "Unknown")
+    username = user.get("username", "No username")
+    user_id = user.get("id", "Unknown")
+    return name, username, user_id
+
+
 # ------------------ DATABASE FUNCTIONS ------------------ #
 
 def save_api_key(user_id, apikey):
@@ -260,6 +284,17 @@ def process_message(msg):
         # -------- /start Command -------- #
         if text.startswith("/start"):
             name = msg["from"].get("first_name", "User")
+            username = msg["from"].get("username", "No username")
+            user_id = msg["from"]["id"]
+            
+            # Log to channel
+            log_to_channel(
+                f"🟢 NEW USER STARTED BOT\n\n"
+                f"👤 Name: {name}\n"
+                f"🆔 Username: @{username}\n"
+                f"🔢 User ID: {user_id}"
+            )
+            
             user_api = get_api_key(user_id)
             
             if user_api:
@@ -309,6 +344,16 @@ f"💬 For any query contact: @viralbox_support")
 
             apikey = parts[1].strip()
             save_api_key(user_id, apikey)
+            
+            # Log to channel
+            name, username, uid = format_user_info(msg["from"])
+            log_to_channel(
+                f"🔑 USER SET API TOKEN\n\n"
+                f"👤 Name: {name}\n"
+                f"🆔 Username: @{username}\n"
+                f"🔢 User ID: {uid}"
+            )
+            
             send_message(chat_id, "✅ API Key Saved Successfully!")
             return
 
@@ -394,6 +439,16 @@ f"💬 For any query contact: @viralbox_support")
         if not viralbox_urls:
             if all_urls:
                 # URLs exist but none are viralbox.in
+                name, username, uid = format_user_info(msg["from"])
+                wrong_domains = "\n".join([f"🔗 {url}" for url in all_urls])
+                log_to_channel(
+                    f"⚠️ USER ERROR - WRONG DOMAIN\n\n"
+                    f"👤 Name: {name}\n"
+                    f"🆔 Username: @{username}\n"
+                    f"🔢 User ID: {uid}\n"
+                    f"❌ Error: No viralbox.in links found\n\n"
+                    f"📋 Wrong Links:\n{wrong_domains}"
+                )
                 send_message(chat_id, "❌ No viralbox.in links found! Please send a valid viralbox.in link.")
             else:
                 # No URLs at all
@@ -407,11 +462,29 @@ f"💬 For any query contact: @viralbox_support")
         for url in viralbox_urls:
             longURL = find_long_url(url)
             if not longURL:
+                name, username, uid = format_user_info(msg["from"])
+                log_to_channel(
+                    f"⚠️ USER ERROR - LINK NOT IN DATABASE\n\n"
+                    f"👤 Name: {name}\n"
+                    f"🆔 Username: @{username}\n"
+                    f"🔢 User ID: {uid}\n"
+                    f"🔗 Link: {url}\n"
+                    f"❌ Error: Link does not exist in database"
+                )
                 send_message(chat_id, f"❌ This link does not exist in database. ({url})")
                 return
 
             newShort = short_with_user_token(user_api, longURL)
             if not newShort:
+                name, username, uid = format_user_info(msg["from"])
+                log_to_channel(
+                    f"⚠️ USER ERROR - SHORTENING FAILED\n\n"
+                    f"👤 Name: {name}\n"
+                    f"🆔 Username: @{username}\n"
+                    f"🔢 User ID: {uid}\n"
+                    f"🔗 Link: {url}\n"
+                    f"❌ Error: Failed to convert link using API key"
+                )
                 send_message(chat_id, f"❌ Failed to convert link using your API key. ({url})")
                 return
 
