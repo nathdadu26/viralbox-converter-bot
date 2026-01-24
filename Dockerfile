@@ -9,25 +9,8 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy bot code
 COPY converter.py .
 
+# Expose health check port
+EXPOSE 8000
+
 # Run the bot
 CMD ["python", "-u", "converter.py"]
-```
-
-### .dockerignore:
-```
-__pycache__/
-*.pyc
-*.pyo
-*.pyd
-.Python
-*.so
-*.egg
-*.egg-info/
-dist/
-build/
-.env.local
-.env.*.local
-.git/
-.gitignore
-README.md
-.DS_Store
