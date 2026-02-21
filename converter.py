@@ -1,4 +1,4 @@
-# converter.py (Webhook Mode for Docker)
+# converter.py (Webhook Mode - Koyeb Free Tier Optimized)
 
 import os
 import requests
@@ -25,12 +25,22 @@ if not BOT_TOKEN or not MONGODB_URI:
 
 app = Flask(__name__)
 
-client = MongoClient(MONGODB_URI, maxPoolSize=50)
-db = client[DB_NAME]
+# ---------------- LAZY MONGODB ----------------
+# Startup pe connect nahi hoga - pehli request pe connect hoga
+# Isse cold start fast hoga (2-3 sec)
+_client = None
+_db = None
 
-links_col = db["links"]
-user_apis_col = db["user_apis"]
-user_settings_col = db["user_settings"]
+def get_db():
+    global _client, _db
+    if _client is None:
+        _client = MongoClient(MONGODB_URI, maxPoolSize=50, serverSelectionTimeoutMS=5000)
+        _db = _client[DB_NAME]
+        print(f"✅ MongoDB connected: {DB_NAME}")
+    return _db
+
+def get_col(name):
+    return get_db()[name]
 
 
 # ------------------ HELPERS ------------------ #
@@ -107,14 +117,14 @@ def format_user_info(user):
 
 def save_api_key(user_id, apikey):
     try:
-        user_apis_col.update_one({"userId": user_id}, {"$set": {"userId": user_id, "apiKey": apikey}}, upsert=True)
+        get_col("user_apis").update_one({"userId": user_id}, {"$set": {"userId": user_id, "apiKey": apikey}}, upsert=True)
     except Exception as e:
         print(f"DB Error: {e}")
 
 
 def get_api_key(user_id):
     try:
-        doc = user_apis_col.find_one({"userId": user_id})
+        doc = get_col("user_apis").find_one({"userId": user_id})
         return doc["apiKey"] if doc else None
     except:
         return None
@@ -122,21 +132,21 @@ def get_api_key(user_id):
 
 def save_user_setting(user_id, key, value):
     try:
-        user_settings_col.update_one({"userId": user_id}, {"$set": {key: value}}, upsert=True)
+        get_col("user_settings").update_one({"userId": user_id}, {"$set": {key: value}}, upsert=True)
     except:
         pass
 
 
 def delete_user_setting(user_id, key):
     try:
-        user_settings_col.update_one({"userId": user_id}, {"$unset": {key: ""}})
+        get_col("user_settings").update_one({"userId": user_id}, {"$unset": {key: ""}})
     except:
         pass
 
 
 def get_user_settings(user_id):
     try:
-        doc = user_settings_col.find_one({"userId": user_id})
+        doc = get_col("user_settings").find_one({"userId": user_id})
         if not doc:
             return {"header": None, "footer": None, "keep_text": False}
         return {"header": doc.get("header"), "footer": doc.get("footer"), "keep_text": doc.get("keep_text", False)}
@@ -146,14 +156,14 @@ def get_user_settings(user_id):
 
 def save_converted(longURL, shortURL):
     try:
-        links_col.insert_one({"longURL": longURL, "shortURL": shortURL, "createdAt": datetime.utcnow()})
+        get_col("links").insert_one({"longURL": longURL, "shortURL": shortURL, "createdAt": datetime.utcnow()})
     except:
         pass
 
 
 def find_long_url(shortURL):
     try:
-        doc = links_col.find_one({"shortURL": shortURL})
+        doc = get_col("links").find_one({"shortURL": shortURL})
         return doc["longURL"] if doc else None
     except:
         return None
@@ -175,6 +185,10 @@ def short_with_user_token(apiKey, longURL):
 
 def process_message(msg):
     try:
+        # Channel posts / anonymous messages ignore karo
+        if not msg.get("from"):
+            return
+
         chat_id = msg["chat"]["id"]
         user_id = msg["from"]["id"]
         text = msg.get("text", "")
@@ -306,6 +320,7 @@ def process_message(msg):
 
 @app.route('/', methods=['GET'])
 @app.route('/health', methods=['GET'])
+@app.route('/healthz', methods=['GET'])
 def health():
     return jsonify({"status": "healthy", "bot": "converter", "timestamp": datetime.utcnow().isoformat()})
 
@@ -323,5 +338,8 @@ def webhook():
 
 
 if __name__ == "__main__":
-    print(f"🤖 Bot running on port {PORT}")
+    print(f"🤖 Converter Bot running on port {PORT}")
+    print(f"🌐 Viralbox Domain: {VIRALBOX_DOMAIN}")
+    print(f"💾 Database: {DB_NAME}")
+    # Gunicorn production me use karo, direct python sirf dev ke liye
     app.run(host='0.0.0.0', port=PORT, debug=False)
